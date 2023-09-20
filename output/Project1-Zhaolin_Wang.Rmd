@@ -1,0 +1,252 @@
+---
+title: "Happy Moments"
+author: "Arpita Shah and Tian Zheng"
+output: html_notebook
+runtime: shiny
+---
+
+HappyDB is a corpus of 100,000 crowd-sourced happy moments via Amazon's Mechanical Turk. 
+
+Here, we explore this data set and try to answer the question, "What makes people happy?"
+
+# Data Preprocessing:
+
+### Load Data: Load cleaned_hm.csv and demographic.csv from the GitHub link.
+### Data Merge: Merge the two CSV files based on the common ID so that we can group the descriptions of happiness by marital status.
+
+```{r}
+library(dplyr)
+library(readr)
+
+# Load data from GitHub link
+cleaned_hm_url <- "https://raw.githubusercontent.com/megagonlabs/HappyDB/master/happydb/data/cleaned_hm.csv"
+demographic_url <- "https://raw.githubusercontent.com/megagonlabs/HappyDB/master/happydb/data/demographic.csv"
+
+cleaned_hm <- read_csv(cleaned_hm_url)
+demographic <- read_csv(demographic_url)
+
+# Merge two datasets based on a common ID (wid)
+merged_data <- inner_join(cleaned_hm, demographic, by = "wid")
+
+head(merged_data)
+
+```
+
+
+```{r}
+if (!requireNamespace("tidyverse", quietly = TRUE)) {
+    install.packages("tidyverse")
+}
+library(tidyverse)
+
+# create a bar chart
+ggplot(merged_data, aes(x = marital)) + 
+  geom_bar(fill = "steelblue") + 
+  theme_minimal() + 
+  labs(title = "Marital status distribution during happy moments", x = "marital status", y = "Frequency") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+We can see that the moments of happiness for married and single individuals are noticeably higher than the other three marital statuses.
+
+There could be several reasons for this observation:
+
+Stability and Support: Married individuals often have the emotional and financial support of their partners, which can contribute to overall happiness.
+Freedom and Independence: Single individuals might experience happiness from the freedom and independence they have, without the responsibilities that come with other marital statuses.
+Less Complicated Relationships: Both married and single individuals might not face the complexities that come with other marital statuses such as divorce or separation, which can be emotionally taxing.
+
+
+# Tokenizing and Stemming:
+Use the NLTK library for tokenization and stemming. Tokenization is the process of breaking down text into words, phrases, or other meaningful elements.
+Stemming is the process of breaking down a word into its root form.
+Remove stop words: Load stop words and stemming functions from the NLTK library. Stop words are words like "a", "the", or "in" that don't convey significant meaning.
+Remove empty documents: After processing, ensure the removal of documents that don't contain any valid word terms.
+
+```{r}
+library(tm)
+library(tidytext)
+library(SnowballC)
+
+# Remove rows where marital status is 'None
+merged_data <- merged_data[!is.na(merged_data$marital) & merged_data$marital != "None", ]
+
+# Define stop words
+custom_stopwords <- c("happy", "ago", "yesterday", "lot", "today", "months", "month", 
+                      "happier", "happiest", "last", "week", "past", "n't", "'s", "'m", "br")
+stopwords <- c(stopwords("en"), custom_stopwords)
+
+# Define tokenization and stemming functions
+tokenization_and_stemming <- function(text) {
+  
+  tokens <- unlist(strsplit(text, "\\W"))
+  
+  tokens <- tokens[!(tolower(tokens) %in% stopwords)]
+  
+  tokens <- tokens[grep("^[[:alpha:]]+$", tokens)]
+  
+  stems <- wordStem(tokens, language = "en")
+  
+  return(stems)
+}
+
+# Apply the tokenization and stemming functions to the 'cleaned_hm' column
+merged_data$processed_text <- sapply(merged_data$cleaned_hm, tokenization_and_stemming)
+
+# Remove empty documents
+merged_data <- merged_data[sapply(merged_data$processed_text, length) > 0, ]
+
+head(merged_data$processed_text)
+
+```
+
+
+# Visualization:
+Create word clouds for each marital status: 
+Use the wordcloud library in Python to create word clouds for each marital status, visualizing the most common words under each status.
+
+```{r}
+library(wordcloud)
+library(tm)
+library(RColorBrewer)
+
+# Create word cloud function for each marital status
+create_wordcloud_for_marital_status <- function(data, status) {
+  
+  status_data <- data[data$marital == status, ]
+  
+  all_text <- paste(status_data$processed_text, collapse = " ")
+  
+  par(pin = c(4, 3))
+  
+  wordcloud(words = all_text, max.words = 75, random.order = FALSE, colors = brewer.pal(8, "Dark2"),  scale = c(3, 0.3))
+  
+
+  title(paste("Word Cloud for Marital Status:", status))
+}
+
+unique_statuses <- unique(merged_data$marital)
+for (status in unique_statuses) {
+  create_wordcloud_for_marital_status(merged_data, status)
+  Sys.sleep(2)  # Pause for 2 seconds between plots
+}
+
+```
+
+
+# Model Training:
+TF-IDF Vectorization: Convert text into numerical vectors using TF-IDF.
+K-means Clustering: Cluster the TF-IDF vectors using the K-means algorithm. Choose the words corresponding to the top 20 TF-IDF values to represent this cluster.
+LDA Topic Modeling: Use LDA for Latent Dirichlet Allocation. This is a topic modeling technique that can help us identify latent topics within the text.
+
+```{r}
+library(tm)
+library(textTinyR)
+library(topicmodels)
+library(tidyverse)
+
+corpus <- Corpus(VectorSource(merged_data$processed_text))
+dtm <- DocumentTermMatrix(corpus, control = list(wordLengths = c(3, Inf)))
+dtm <- removeSparseTerms(dtm, 0.98) # 使用一个更为宽松的阈值
+
+unique_marital_statuses <- unique(merged_data$marital)
+
+lda_models <- list()
+
+# train the model for each marital status.
+for (status in unique_marital_statuses) {
+  marital_data <- merged_data[merged_data$marital == status, ]
+  
+  corpus <- Corpus(VectorSource(marital_data$processed_text))
+  dtm_status <- DocumentTermMatrix(corpus, control = list(wordLengths = c(3, Inf)))
+  dtm_status <- removeSparseTerms(dtm_status, 0.98)
+  
+  dtm_status <- dtm_status[rowSums(as.matrix(dtm_status)) > 0, ]
+  
+  tfidf <- weightTfIdf(dtm_status)
+  
+  num_clusters <- min(nrow(tfidf), 5)
+  if (num_clusters > 1) { 
+    clusters <- kmeans(as.matrix(tfidf), centers = num_clusters)$cluster
+  } else {
+    cat(paste("\nNot enough data for marital status:", status, "to perform clustering.\n"))
+    next
+  }
+  
+  lda_model <- LDA(dtm_status, k = min(5, nrow(dtm_status)), control = list(seed = 1234))
+  
+  lda_models[[status]] <- lda_model
+  
+  topics <- as.data.frame(lda_model@gamma)
+  
+  topics$dominant_topic <- apply(topics, 1, which.max)
+  topics$document <- rownames(topics)
+  
+  cat(paste("\nTop 15 keywords for marital status:", status, "\n"))
+  print(terms(lda_model, 15))
+  
+  topics_words_matrix <- as.data.frame(topics)
+  rownames(topics_words_matrix) <- paste("Doc", 1:nrow(topics_words_matrix))
+  print(topics_words_matrix)
+  
+  rm(corpus, dtm_status, tfidf, clusters, topics, topics_words_matrix)
+  gc() 
+}
+
+print(lda_models)
+
+
+```
+
+
+```{r}
+# Extract the top n keywords for each topic
+get_topic_words <- function(lda_model, n_words = 10) {
+  terms_matrix <- as.matrix(terms(lda_model, n_words))
+  topics_list <- list()
+  
+  for (i in 1:ncol(terms_matrix)) {
+    topics_list[[i]] <- as.character(terms_matrix[, i])
+  }
+  
+  return(topics_list)
+}
+
+all_topic_words <- list()
+
+for (status in names(lda_models)) {
+  topic_words <- get_topic_words(lda_models[[status]])
+  df <- as.data.frame(t(as.data.frame(topic_words)))
+  colnames(df) <- paste("Word", 0:(ncol(df) - 1))
+  rownames(df) <- paste("Topic", 0:(nrow(df) - 1))
+  all_topic_words[[status]] <- df
+}
+
+for (status in names(all_topic_words)) {
+  cat(paste("\nKeywords for marital status:", status, "\n"))
+  print(all_topic_words[[status]])
+}
+
+
+```
+From our analysis, different marital statuses impact the topics of people's happy moments.
+
+For singles, daily activities and interactions with friends are primary happiness sources. They might rely more on social circles, having more time for social events and valuing friendships, given the absence of a partner or family.
+
+For married individuals, work and family are focal points. Balancing work, family, and other responsibilities becomes essential. The family, be it time with a spouse or children, is a major happiness source. They might engage less in social events, prioritizing family and work duties.
+
+Divorced individuals, with keywords like "new," indicate a fresh start, finding happiness in friendships and social activities.
+
+Reasons include:
+
+Life stages and responsibilities: Singles might enjoy more freedom and fewer duties, while married people balance work and family.
+Social interaction shifts: Marriage can alter one's social circle. Married individuals might bond more with family, while singles engage more with friends.
+Value changes: Marriage and parenthood can shift priorities. Family often becomes paramount for the married, with work as a secondary focus.
+In essence, marital status influences lifestyle, values, and described happy moments.
+
+Just like recent things that have made me happy are:
+I went to the movies over the weekend.
+I received an interview invitation from Amazon.
+My friends and I played video games at home.
+
+These all revolve around social and everyday activities.
